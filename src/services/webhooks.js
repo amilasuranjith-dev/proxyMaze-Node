@@ -23,6 +23,7 @@ async function deliverWebhook(url, payload) {
       state.metrics.webhook_deliveries++;
       break;
     } catch (e) {
+      console.error("Webhook fetch error:", e.message);
       await new Promise(r => setTimeout(r, 1000));
     }
   }
