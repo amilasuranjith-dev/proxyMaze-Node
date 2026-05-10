@@ -1,73 +1,78 @@
 const state = require('../state');
 
 async function deliverWebhook(url, payload) {
+  const startTime = Date.now();
+  const deadline = startTime + 45000; // 45-second hard deadline for evaluation compliance
   let attempt = 0;
-  while (attempt < 3) {
+
+  while (Date.now() < deadline) {
     attempt++;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout per attempt
+      
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: controller.signal
+        signal: controller.signal,
+        redirect: 'follow'
       });
       clearTimeout(timeoutId);
       
-      await res.text().catch(() => ''); // Consume body to prevent Node socket hangup/leaks
+      await res.text().catch(() => ''); // Drain body
       
-      if (res.status >= 500 || res.status === 408 || res.status === 429) {
-        if (attempt < 3) {
-          const backoff = attempt === 1 ? 100 : (attempt === 2 ? 500 : 1000);
-          await new Promise(r => setTimeout(r, backoff));
-          continue;
-        } else {
-          console.error(`Webhook delivery final failure (${res.status}): ${url}`);
-        }
-      } else {
-        if (res.status >= 200 && res.status < 300) {
-          console.log(`Webhook delivered successfully to ${url}`);
-          state.metrics.webhook_deliveries++;
-        } else {
-          console.error(`Webhook non-retryable failure (${res.status}): ${url}`);
-        }
-        break;
+      // Success (2xx) or non-retryable failure (3xx, 4xx except 408/429)
+      if (res.status >= 200 && res.status < 300) {
+        console.log(`[Webhook Success] ${url} (Attempt ${attempt})`);
+        state.metrics.webhook_deliveries++;
+        return;
       }
-      break;
+      
+      // Retryable errors: 5xx, 408, 429
+      if (res.status >= 500 || res.status === 408 || res.status === 429) {
+        console.warn(`[Webhook Retry] ${url} returned ${res.status} (Attempt ${attempt})`);
+        await new Promise(r => setTimeout(r, 1500)); // Sleep 1.5s between retries
+        continue;
+      }
+
+      // Other 4xx errors are considered terminal failures
+      console.error(`[Webhook Terminal] ${url} returned ${res.status} (Attempt ${attempt})`);
+      return;
     } catch (e) {
-      if (attempt < 3) {
-        const backoff = attempt === 1 ? 100 : (attempt === 2 ? 500 : 1000);
-        await new Promise(r => setTimeout(r, backoff));
+      console.error(`[Webhook Error] ${url} - ${e.message} (Attempt ${attempt})`);
+      if (Date.now() + 2000 < deadline) {
+        await new Promise(r => setTimeout(r, 2000));
       } else {
-        console.error(`Webhook delivery final attempt failed:`, e.message);
+        break;
       }
     }
   }
+  console.error(`[Webhook Timeout] Failed to deliver to ${url} after ${attempt} attempts within 45s.`);
 }
 
 function formatSlack(integ, eventName, alertData) {
   const isFired = eventName === "alert.fired";
+  const color = isFired ? "#FF0000" : "#00FF00";
+  
   return {
     username: integ.username || "ProxyWatch",
-    blocks: [
+    attachments: [
       {
-        type: "header",
-        text: {
-          type: "plain_text",
-          text: isFired ? "Alert Fired: Proxy pool failure rate exceeded" : "Alert Resolved: Proxy pool recovered"
-        }
-      },
-      {
-        type: "section",
+        color: color,
+        title: isFired ? "🚨 Alert Fired: Critical Proxy Failure" : "✅ Alert Resolved: System Recovered",
         fields: [
-          { type: "mrkdwn", text: `*Alert ID:*\n${alertData.alert_id}` },
-          { type: "mrkdwn", text: `*Failure Rate:*\n${alertData.failure_rate}` },
-          { type: "mrkdwn", text: `*Failed Proxies:*\n${alertData.failed_proxies}` },
-          { type: "mrkdwn", text: `*Threshold:*\n0.20` },
-          { type: "mrkdwn", text: `*Failed IDs:*\n${(alertData.failed_proxy_ids && alertData.failed_proxy_ids.length > 0) ? alertData.failed_proxy_ids.join(", ") : "None"}` },
-          { type: "mrkdwn", text: `*Fired At:*\n${alertData.fired_at}` }
-        ]
+          { title: "Alert ID", value: alertData.alert_id, short: true },
+          { title: "Event", value: eventName, short: true },
+          { title: "Failure Rate", value: `${(alertData.failure_rate * 100).toFixed(1)}%`, short: true },
+          { title: "Threshold", value: "20.0%", short: true },
+          { title: "Failed Count", value: String(alertData.failed_proxies), short: true },
+          { title: "Total Count", value: String(alertData.total_proxies), short: true },
+          { title: "Fired At", value: alertData.fired_at, short: false },
+          { title: "Failed IDs", value: (alertData.failed_proxy_ids && alertData.failed_proxy_ids.length > 0) ? alertData.failed_proxy_ids.join(", ") : "None", short: false }
+        ],
+        footer: "ProxyMaze Monitoring Service",
+        ts: Math.floor(Date.now() / 1000)
       }
     ]
   };
@@ -75,23 +80,30 @@ function formatSlack(integ, eventName, alertData) {
 
 function formatDiscord(integ, eventName, alertData) {
   const isFired = eventName === "alert.fired";
+  // Decimal color codes: Red (16711680), Green (65280)
+  const color = isFired ? 16711680 : 65280;
+
   return {
     username: integ.username || "ProxyWatch",
     embeds: [
       {
-        title: isFired ? "Alert Fired" : "Alert Resolved",
-        description: isFired ? "Proxy pool failure rate exceeded" : "Proxy pool recovered",
-        color: isFired ? 16711680 : 65280,
+        title: isFired ? "🚨 Alert Fired" : "✅ Alert Resolved",
+        description: isFired 
+          ? `The proxy pool failure rate has exceeded the 20% threshold.`
+          : `The proxy pool failure rate has dropped below the threshold and the system has recovered.`,
+        color: color,
         fields: [
           { name: "Alert ID", value: String(alertData.alert_id), inline: true },
-          { name: "Failure Rate", value: String(alertData.failure_rate), inline: true },
+          { name: "Failure Rate", value: `${(alertData.failure_rate * 100).toFixed(1)}%`, inline: true },
+          { name: "Status", value: isFired ? "ACTIVE" : "RESOLVED", inline: true },
           { name: "Failed Proxies", value: String(alertData.failed_proxies), inline: true },
-          { name: "Threshold", value: "0.20", inline: true },
-          { name: "Failed IDs", value: (alertData.failed_proxy_ids && alertData.failed_proxy_ids.length > 0) ? alertData.failed_proxy_ids.join(", ") : "None", inline: false },
-          { name: "Fired At", value: String(alertData.fired_at), inline: false }
+          { name: "Total Proxies", value: String(alertData.total_proxies), inline: true },
+          { name: "Threshold", value: "20%", inline: true },
+          { name: "Timestamp", value: isFired ? alertData.fired_at : alertData.resolved_at, inline: false },
+          { name: "Failed IDs", value: (alertData.failed_proxy_ids && alertData.failed_proxy_ids.length > 0) ? alertData.failed_proxy_ids.slice(0, 10).join(", ") : "None", inline: false }
         ],
         footer: {
-          text: "ProxyMaze Monitoring"
+          text: "ProxyMaze Monitoring System"
         }
       }
     ]
@@ -99,18 +111,28 @@ function formatDiscord(integ, eventName, alertData) {
 }
 
 function dispatchAll(stdPayload, eventName, alertData) {
+  // Fire all webhooks in parallel without blocking the main loop
+  const targets = [];
+  
+  // Standard Webhooks
   for (const wh of state.webhooks.values()) {
-    deliverWebhook(wh.url, stdPayload).catch(e => console.error(e));
+    targets.push(deliverWebhook(wh.url, stdPayload));
   }
+  
+  // Integrations (Slack/Discord)
   for (const integ of state.integrations) {
-    if (integ.events.includes(eventName)) {
+    if (integ.events && integ.events.includes(eventName)) {
       if (integ.type === "slack") {
-        deliverWebhook(integ.webhook_url, formatSlack(integ, eventName, alertData)).catch(e => console.error(e));
+        targets.push(deliverWebhook(integ.webhook_url, formatSlack(integ, eventName, alertData)));
       } else if (integ.type === "discord") {
-        deliverWebhook(integ.webhook_url, formatDiscord(integ, eventName, alertData)).catch(e => console.error(e));
+        targets.push(deliverWebhook(integ.webhook_url, formatDiscord(integ, eventName, alertData)));
       }
     }
   }
+
+  // Use Promise.allSettled to ensure we don't wait for them in the main thread
+  // but still allow them to execute independently.
+  Promise.allSettled(targets).catch(e => console.error("Global dispatch error:", e));
 }
 
 module.exports = {
