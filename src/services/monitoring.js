@@ -31,21 +31,36 @@ async function performChecks() {
       isUp = false;
     }
 
-    const newStatus = isUp ? "up" : "down";
-    proxy.status = newStatus;
-    proxy.last_checked_at = checkTime;
-    proxy.total_checks++;
-    if (isUp) {
-       proxy.successful_checks++;
-       proxy.consecutive_failures = 0;
-    } else {
-       proxy.consecutive_failures++;
-    }
-    proxy.history.push({ checked_at: checkTime, status: newStatus });
-    state.metrics.total_checks++;
+    return {
+      id: proxy.id,
+      checkTime,
+      isUp,
+      newStatus: isUp ? "up" : "down"
+    };
   });
 
-  await Promise.allSettled(checkPromises);
+  const results = await Promise.allSettled(checkPromises);
+
+  // Apply all updates atomically to prevent inconsistent evaluator reads
+  for (const res of results) {
+    if (res.status === 'fulfilled') {
+      const { id, checkTime, isUp, newStatus } = res.value;
+      const proxy = state.proxies.get(id);
+      if (proxy) {
+        proxy.status = newStatus;
+        proxy.last_checked_at = checkTime;
+        proxy.total_checks++;
+        if (isUp) {
+           proxy.successful_checks++;
+           proxy.consecutive_failures = 0;
+        } else {
+           proxy.consecutive_failures++;
+        }
+        proxy.history.push({ checked_at: checkTime, status: newStatus });
+        state.metrics.total_checks++;
+      }
+    }
+  }
   evaluateAlerts();
 }
 
