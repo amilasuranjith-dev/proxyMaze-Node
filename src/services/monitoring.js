@@ -10,6 +10,7 @@ async function performChecks() {
     const checkTime = getIsoDate();
     let isUp = false;
     let statusCode = null;
+    let failureReason = null;
 
     try {
       const controller = new AbortController();
@@ -26,16 +27,25 @@ async function performChecks() {
         isUp = true;
       } else {
         isUp = false;
+        if (response.status >= 500) failureReason = 'http_5xx';
+        else if (response.status >= 400) failureReason = 'http_4xx';
+        else failureReason = `http_${response.status}`;
       }
     } catch (err) {
       isUp = false;
+      if (err.name === 'AbortError') {
+        failureReason = 'timeout';
+      } else {
+        failureReason = 'network_error';
+      }
     }
 
     return {
       id: proxy.id,
       checkTime,
       isUp,
-      newStatus: isUp ? "up" : "down"
+      newStatus: isUp ? "up" : "down",
+      failureReason
     };
   });
 
@@ -44,7 +54,7 @@ async function performChecks() {
   // Apply all updates atomically to prevent inconsistent evaluator reads
   for (const res of results) {
     if (res.status === 'fulfilled') {
-      const { id, checkTime, isUp, newStatus } = res.value;
+      const { id, checkTime, isUp, newStatus, failureReason } = res.value;
       const proxy = state.proxies.get(id);
       if (proxy) {
         proxy.status = newStatus;
@@ -56,7 +66,7 @@ async function performChecks() {
         } else {
            proxy.consecutive_failures++;
         }
-        proxy.history.push({ checked_at: checkTime, status: newStatus });
+        proxy.history.push({ checked_at: checkTime, status: newStatus, failureReason });
         state.metrics.total_checks++;
       }
     }

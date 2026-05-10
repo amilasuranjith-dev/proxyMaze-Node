@@ -4,7 +4,7 @@ const state = require('../state');
 const { evaluateAlerts } = require('../services/alerts');
 const { triggerImmediateCheck } = require('../services/monitoring');
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const proxyUrls = req.body.proxies;
   const replace = req.body.replace;
   
@@ -45,6 +45,7 @@ router.post('/', (req, res) => {
   }
   
   triggerImmediateCheck();
+  await evaluateAlerts();
 
   res.status(201).json({
     accepted: proxyUrls.length,

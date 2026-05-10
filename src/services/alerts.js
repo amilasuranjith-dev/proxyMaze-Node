@@ -35,7 +35,7 @@ async function fireAlert(failureRate, total, downCount, failedIds) {
     message: state.activeAlert.message
   };
 
-  await dispatchAll(stdPayload, "alert.fired", state.activeAlert);
+  dispatchAll(stdPayload, "alert.fired", state.activeAlert);
 }
 
 async function resolveAlert() {
@@ -52,7 +52,7 @@ async function resolveAlert() {
   const snapshot = { ...state.activeAlert };
   state.activeAlert = null;
   
-  await dispatchAll(stdPayload, "alert.resolved", snapshot);
+  dispatchAll(stdPayload, "alert.resolved", snapshot);
 }
 
 async function evaluateAlerts() {
@@ -81,6 +81,7 @@ async function evaluateAlerts() {
       state.activeAlert.total_proxies = total;
       state.activeAlert.failed_proxies = downCount;
       state.activeAlert.failed_proxy_ids = failedIds;
+      state.activeAlert.updated_at = getIsoDate();
     }
   } else {
     if (state.activeAlert) {

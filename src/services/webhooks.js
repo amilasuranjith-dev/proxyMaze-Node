@@ -1,10 +1,8 @@
 const state = require('../state');
 
-const transientErrors = [500, 502, 503, 504];
-
 async function deliverWebhook(url, payload) {
   let attempt = 0;
-  while (true) {
+  while (attempt < 3) {
     attempt++;
     try {
       const controller = new AbortController();
@@ -17,18 +15,33 @@ async function deliverWebhook(url, payload) {
       });
       clearTimeout(timeoutId);
       
-      const responseBody = await res.text().catch(() => ''); // Consume body to prevent Node socket hangup/leaks
+      await res.text().catch(() => ''); // Consume body to prevent Node socket hangup/leaks
       
-      if (transientErrors.includes(res.status)) {
-        await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 30000)));
-        continue;
+      if (res.status >= 500 || res.status === 408 || res.status === 429) {
+        if (attempt < 3) {
+          const backoff = attempt === 1 ? 100 : (attempt === 2 ? 500 : 1000);
+          await new Promise(r => setTimeout(r, backoff));
+          continue;
+        } else {
+          console.error(`Webhook delivery final failure (${res.status}): ${url}`);
+        }
+      } else {
+        if (res.status >= 200 && res.status < 300) {
+          console.log(`Webhook delivered successfully to ${url}`);
+          state.metrics.webhook_deliveries++;
+        } else {
+          console.error(`Webhook non-retryable failure (${res.status}): ${url}`);
+        }
+        break;
       }
-      
-      state.metrics.webhook_deliveries++;
       break;
     } catch (e) {
-      console.error(`Webhook delivery attempt ${attempt} failed:`, e.message);
-      await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 30000)));
+      if (attempt < 3) {
+        const backoff = attempt === 1 ? 100 : (attempt === 2 ? 500 : 1000);
+        await new Promise(r => setTimeout(r, backoff));
+      } else {
+        console.error(`Webhook delivery final attempt failed:`, e.message);
+      }
     }
   }
 }
@@ -85,21 +98,19 @@ function formatDiscord(integ, eventName, alertData) {
   };
 }
 
-async function dispatchAll(stdPayload, eventName, alertData) {
-  const promises = [];
+function dispatchAll(stdPayload, eventName, alertData) {
   for (const wh of state.webhooks.values()) {
-    promises.push(deliverWebhook(wh.url, stdPayload));
+    deliverWebhook(wh.url, stdPayload).catch(e => console.error(e));
   }
   for (const integ of state.integrations) {
     if (integ.events.includes(eventName)) {
       if (integ.type === "slack") {
-        promises.push(deliverWebhook(integ.webhook_url, formatSlack(integ, eventName, alertData)));
+        deliverWebhook(integ.webhook_url, formatSlack(integ, eventName, alertData)).catch(e => console.error(e));
       } else if (integ.type === "discord") {
-        promises.push(deliverWebhook(integ.webhook_url, formatDiscord(integ, eventName, alertData)));
+        deliverWebhook(integ.webhook_url, formatDiscord(integ, eventName, alertData)).catch(e => console.error(e));
       }
     }
   }
-  await Promise.allSettled(promises);
 }
 
 module.exports = {
