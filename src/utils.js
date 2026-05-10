@@ -1,5 +1,5 @@
 function getIsoDate() {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return new Date().toISOString();
 }
 
 module.exports = { getIsoDate };

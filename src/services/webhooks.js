@@ -1,6 +1,6 @@
 const state = require('../state');
 
-const transientErrors = [500, 502, 503, 504];
+const transientErrors = [408, 429, 500, 502, 503, 504];
 
 async function deliverWebhook(url, payload) {
   while (true) {
@@ -14,6 +14,8 @@ async function deliverWebhook(url, payload) {
         signal: controller.signal
       });
       clearTimeout(timeoutId);
+      
+      const responseBody = await res.text().catch(() => ''); // Consume body to prevent Node socket hangup/leaks
       
       if (transientErrors.includes(res.status)) {
         await new Promise(r => setTimeout(r, 1000));
