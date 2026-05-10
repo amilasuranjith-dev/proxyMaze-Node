@@ -105,9 +105,9 @@ router.get('/:id/history', (req, res) => {
   res.json(p.history);
 });
 
-router.delete('/', (req, res) => {
+router.delete('/', async (req, res) => {
   state.proxies.clear();
-  evaluateAlerts(); 
+  await evaluateAlerts(); 
   res.status(204).send();
 });
 

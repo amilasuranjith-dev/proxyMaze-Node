@@ -61,7 +61,7 @@ async function performChecks() {
       }
     }
   }
-  evaluateAlerts();
+  await evaluateAlerts();
 }
 
 async function monitoringLoop(version) {

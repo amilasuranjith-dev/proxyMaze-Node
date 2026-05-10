@@ -1,9 +1,11 @@
 const state = require('../state');
 
-const transientErrors = [408, 429, 500, 502, 503, 504];
+const transientErrors = [500, 502, 503, 504];
 
 async function deliverWebhook(url, payload) {
+  let attempt = 0;
   while (true) {
+    attempt++;
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -18,59 +20,63 @@ async function deliverWebhook(url, payload) {
       const responseBody = await res.text().catch(() => ''); // Consume body to prevent Node socket hangup/leaks
       
       if (transientErrors.includes(res.status)) {
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 30000)));
         continue;
       }
       
       state.metrics.webhook_deliveries++;
       break;
     } catch (e) {
-      console.error("Webhook fetch error:", e.message);
-      await new Promise(r => setTimeout(r, 1000));
+      console.error(`Webhook delivery attempt ${attempt} failed:`, e.message);
+      await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 30000)));
     }
   }
 }
 
 function formatSlack(integ, eventName, alertData) {
-  const fields = [
-    { title: "Alert ID", value: alertData.alert_id },
-    { title: "Failure Rate", value: alertData.failure_rate.toString() },
-    { title: "Failed Proxies", value: alertData.failed_proxies.toString() },
-    { title: "Threshold", value: "0.20" },
-    { title: "Failed IDs", value: alertData.failed_proxy_ids.join(", ") || "None" },
-    { title: "Fired At", value: alertData.fired_at }
-  ];
+  const isFired = eventName === "alert.fired";
   return {
     username: integ.username || "ProxyWatch",
-    text: eventName === "alert.fired" ? "Alert Fired: Proxy pool failure rate exceeded" : "Alert Resolved: Proxy pool recovered",
-    attachments: [
+    blocks: [
       {
-        color: eventName === "alert.fired" ? "#FF0000" : "#00FF00",
-        fields: fields,
-        footer: "ProxyMaze Monitoring",
-        ts: Math.floor(Date.now() / 1000)
+        type: "header",
+        text: {
+          type: "plain_text",
+          text: isFired ? "Alert Fired: Proxy pool failure rate exceeded" : "Alert Resolved: Proxy pool recovered"
+        }
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*Alert ID:*\n${alertData.alert_id}` },
+          { type: "mrkdwn", text: `*Failure Rate:*\n${alertData.failure_rate}` },
+          { type: "mrkdwn", text: `*Failed Proxies:*\n${alertData.failed_proxies}` },
+          { type: "mrkdwn", text: `*Threshold:*\n0.20` },
+          { type: "mrkdwn", text: `*Failed IDs:*\n${(alertData.failed_proxy_ids && alertData.failed_proxy_ids.length > 0) ? alertData.failed_proxy_ids.join(", ") : "None"}` },
+          { type: "mrkdwn", text: `*Fired At:*\n${alertData.fired_at}` }
+        ]
       }
     ]
   };
 }
 
 function formatDiscord(integ, eventName, alertData) {
-  const fields = [
-    { name: "Alert ID", value: alertData.alert_id },
-    { name: "Failure Rate", value: alertData.failure_rate.toString() },
-    { name: "Failed Proxies", value: alertData.failed_proxies.toString() },
-    { name: "Threshold", value: "0.20" },
-    { name: "Failed IDs", value: alertData.failed_proxy_ids.join(", ") || "None" },
-    { name: "Fired At", value: alertData.fired_at }
-  ];
+  const isFired = eventName === "alert.fired";
   return {
     username: integ.username || "ProxyWatch",
     embeds: [
       {
-        title: eventName === "alert.fired" ? "Alert Fired" : "Alert Resolved",
-        description: eventName === "alert.fired" ? "Proxy pool failure rate exceeded" : "Proxy pool recovered",
-        color: eventName === "alert.fired" ? 16711680 : 65280,
-        fields: fields,
+        title: isFired ? "Alert Fired" : "Alert Resolved",
+        description: isFired ? "Proxy pool failure rate exceeded" : "Proxy pool recovered",
+        color: isFired ? 16711680 : 65280,
+        fields: [
+          { name: "Alert ID", value: String(alertData.alert_id), inline: true },
+          { name: "Failure Rate", value: String(alertData.failure_rate), inline: true },
+          { name: "Failed Proxies", value: String(alertData.failed_proxies), inline: true },
+          { name: "Threshold", value: "0.20", inline: true },
+          { name: "Failed IDs", value: (alertData.failed_proxy_ids && alertData.failed_proxy_ids.length > 0) ? alertData.failed_proxy_ids.join(", ") : "None", inline: false },
+          { name: "Fired At", value: String(alertData.fired_at), inline: false }
+        ],
         footer: {
           text: "ProxyMaze Monitoring"
         }
@@ -79,19 +85,21 @@ function formatDiscord(integ, eventName, alertData) {
   };
 }
 
-function dispatchAll(stdPayload, eventName, alertData) {
+async function dispatchAll(stdPayload, eventName, alertData) {
+  const promises = [];
   for (const wh of state.webhooks.values()) {
-    deliverWebhook(wh.url, stdPayload);
+    promises.push(deliverWebhook(wh.url, stdPayload));
   }
   for (const integ of state.integrations) {
     if (integ.events.includes(eventName)) {
       if (integ.type === "slack") {
-        deliverWebhook(integ.webhook_url, formatSlack(integ, eventName, alertData));
+        promises.push(deliverWebhook(integ.webhook_url, formatSlack(integ, eventName, alertData)));
       } else if (integ.type === "discord") {
-        deliverWebhook(integ.webhook_url, formatDiscord(integ, eventName, alertData));
+        promises.push(deliverWebhook(integ.webhook_url, formatDiscord(integ, eventName, alertData)));
       }
     }
   }
+  await Promise.allSettled(promises);
 }
 
 module.exports = {

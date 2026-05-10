@@ -3,10 +3,11 @@ const { v4: uuidv4 } = require('uuid');
 const { getIsoDate } = require('../utils');
 const { dispatchAll } = require('./webhooks');
 
-function fireAlert(failureRate, total, downCount, failedIds) {
+async function fireAlert(failureRate, total, downCount, failedIds) {
   const alertId = `alert-${uuidv4()}`;
   const now = getIsoDate();
-  state.activeAlert = {
+  
+  const newAlert = {
     alert_id: alertId,
     status: "active",
     failure_rate: failureRate,
@@ -18,6 +19,8 @@ function fireAlert(failureRate, total, downCount, failedIds) {
     resolved_at: null,
     message: "Proxy pool failure rate exceeded threshold"
   };
+  
+  state.activeAlert = newAlert;
   state.alerts.push(state.activeAlert);
 
   const stdPayload = {
@@ -32,10 +35,10 @@ function fireAlert(failureRate, total, downCount, failedIds) {
     message: state.activeAlert.message
   };
 
-  dispatchAll(stdPayload, "alert.fired", state.activeAlert);
+  await dispatchAll(stdPayload, "alert.fired", state.activeAlert);
 }
 
-function resolveAlert() {
+async function resolveAlert() {
   const now = getIsoDate();
   state.activeAlert.status = "resolved";
   state.activeAlert.resolved_at = now;
@@ -46,14 +49,16 @@ function resolveAlert() {
     resolved_at: now
   };
   
-  dispatchAll(stdPayload, "alert.resolved", state.activeAlert);
+  const snapshot = { ...state.activeAlert };
   state.activeAlert = null;
+  
+  await dispatchAll(stdPayload, "alert.resolved", snapshot);
 }
 
-function evaluateAlerts() {
+async function evaluateAlerts() {
   const total = state.proxies.size;
   if (total === 0) {
-    if (state.activeAlert) resolveAlert();
+    if (state.activeAlert) await resolveAlert();
     return;
   }
 
@@ -70,7 +75,7 @@ function evaluateAlerts() {
 
   if (failureRate >= 0.20) {
     if (!state.activeAlert) {
-      fireAlert(failureRate, total, downCount, failedIds);
+      await fireAlert(failureRate, total, downCount, failedIds);
     } else {
       state.activeAlert.failure_rate = failureRate;
       state.activeAlert.total_proxies = total;
@@ -79,7 +84,7 @@ function evaluateAlerts() {
     }
   } else {
     if (state.activeAlert) {
-      resolveAlert();
+      await resolveAlert();
     }
   }
 }
